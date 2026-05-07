@@ -1,77 +1,88 @@
-"""Parser registry for envlens.
-
-Exports a unified ``parse`` entry point that selects the correct parser
-based on the file path or an explicit *format* hint.
-"""
+"""Parser registry — detect format and dispatch to the right parser."""
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Dict, Optional
+import os
+from typing import Dict
 
-from .dotenv_parser import parse_dotenv_file
-from .docker_parser import parse_dockerfile_file
-from .github_actions_parser import parse_github_actions_file
-from .circleci_parser import parse_circleci_file
-from .travis_parser import parse_travis_file
+from envlens.parsers.dotenv_parser import parse_dotenv_file
+from envlens.parsers.docker_parser import parse_dockerfile_file
+from envlens.parsers.github_actions_parser import parse_github_actions_file
+from envlens.parsers.circleci_parser import parse_circleci_file
+from envlens.parsers.travis_parser import parse_travis_file
+from envlens.parsers.gitlab_ci_parser import parse_gitlab_ci_file
+from envlens.parsers.bitbucket_parser import parse_bitbucket_pipelines_file
+from envlens.parsers.jenkins_parser import parse_jenkins_file
+from envlens.parsers.azure_pipelines_parser import parse_azure_pipelines_file
 
-__all__ = [
-    "parse_dotenv_file",
-    "parse_dockerfile_file",
-    "parse_github_actions_file",
-    "parse_circleci_file",
-    "parse_travis_file",
-    "detect_format",
-    "parse",
-]
+# ---------------------------------------------------------------------------
+# Format detection
+# ---------------------------------------------------------------------------
 
-_EXTENSION_MAP: Dict[str, str] = {
-    ".env": "dotenv",
-    "dockerfile": "dockerfile",
-    ".yml": "yaml",
-    ".yaml": "yaml",
-}
-
-_NAME_MAP: Dict[str, str] = {
+_BASENAME_MAP: Dict[str, str] = {
     "dockerfile": "dockerfile",
     ".travis.yml": "travis",
-    ".travis.yaml": "travis",
     ".circleci/config.yml": "circleci",
-    ".circleci/config.yaml": "circleci",
+    ".gitlab-ci.yml": "gitlab_ci",
+    "bitbucket-pipelines.yml": "bitbucket",
+    "jenkinsfile": "jenkins",
+    "azure-pipelines.yml": "azure_pipelines",
+}
+
+_SUFFIX_MAP: Dict[str, str] = {
+    ".env": "dotenv",
+}
+
+# Subpath fragments that identify CI configs by directory/filename patterns
+_SUBPATH_FRAGMENTS: Dict[str, str] = {
+    ".github/workflows": "github_actions",
+    ".circleci/config": "circleci",
 }
 
 
-def detect_format(path: str) -> Optional[str]:
-    """Infer the config format from the file path.
+def detect_format(path: str) -> str:
+    """Return a format identifier string for *path*.
 
-    Returns one of ``'dotenv'``, ``'dockerfile'``, ``'github_actions'``,
-    ``'circleci'``, ``'travis'``, or ``None`` if unknown.
+    Raises :class:`ValueError` if the format cannot be determined.
     """
-    p = Path(path)
-    name_lower = p.name.lower()
+    normalised = path.replace("\\", "/").lower()
+    basename = os.path.basename(normalised)
 
-    # Exact name matches take priority
-    if name_lower in _NAME_MAP:
-        return _NAME_MAP[name_lower]
+    # Exact basename matches
+    if basename in _BASENAME_MAP:
+        return _BASENAME_MAP[basename]
 
-    # Check if any parent directory is .github/workflows
-    parts_lower = [part.lower() for part in p.parts]
-    if ".github" in parts_lower and "workflows" in parts_lower:
+    # Suffix matches (.env, .env.local, etc.)
+    for suffix, fmt in _SUFFIX_MAP.items():
+        if basename == suffix or basename.endswith(suffix):
+            return fmt
+
+    # Subpath fragment matches
+    for fragment, fmt in _SUBPATH_FRAGMENTS.items():
+        if fragment in normalised:
+            return fmt
+
+    # GitHub Actions — any .yml/.yaml under .github/workflows
+    if ".github/workflows" in normalised and normalised.endswith((".yml", ".yaml")):
         return "github_actions"
 
-    if ".circleci" in parts_lower:
-        return "circleci"
+    # GitLab CI variants
+    if basename == ".gitlab-ci.yml":
+        return "gitlab_ci"
 
-    # Extension-based fallback
-    suffix = p.suffix.lower()
-    if suffix in _EXTENSION_MAP:
-        return _EXTENSION_MAP[suffix]
+    # Azure Pipelines common alternative names
+    if basename in ("azure-pipelines.yaml", "azure_pipelines.yml", "azure_pipelines.yaml"):
+        return "azure_pipelines"
 
-    if name_lower.startswith(".env"):
-        return "dotenv"
+    raise ValueError(
+        f"Cannot detect environment format for path: {path!r}. "
+        "Use --format to specify it explicitly."
+    )
 
-    return None
 
+# ---------------------------------------------------------------------------
+# Unified parse entry-point
+# ---------------------------------------------------------------------------
 
 _PARSERS = {
     "dotenv": parse_dotenv_file,
@@ -79,30 +90,22 @@ _PARSERS = {
     "github_actions": parse_github_actions_file,
     "circleci": parse_circleci_file,
     "travis": parse_travis_file,
+    "gitlab_ci": parse_gitlab_ci_file,
+    "bitbucket": parse_bitbucket_pipelines_file,
+    "jenkins": parse_jenkins_file,
+    "azure_pipelines": parse_azure_pipelines_file,
 }
 
 
-def parse(path: str, fmt: Optional[str] = None) -> Dict[str, str]:
-    """Parse *path* and return a flat ``{key: value}`` dict.
+def parse(path: str, fmt: str | None = None) -> Dict[str, str]:
+    """Parse *path* and return a ``{key: value}`` mapping.
 
-    Parameters
-    ----------
-    path:
-        Path to the config file.
-    fmt:
-        Optional format override. When omitted, :func:`detect_format` is used.
-
-    Raises
-    ------
-    ValueError
-        If the format cannot be detected or is not supported.
+    If *fmt* is ``None``, the format is auto-detected via :func:`detect_format`.
     """
-    resolved = fmt or detect_format(path)
-    if resolved is None:
+    resolved_fmt = fmt or detect_format(path)
+    if resolved_fmt not in _PARSERS:
         raise ValueError(
-            f"Cannot detect format for '{path}'. "
-            "Pass fmt= explicitly (dotenv, dockerfile, github_actions, circleci, travis)."
+            f"Unsupported format {resolved_fmt!r}. "
+            f"Valid options: {sorted(_PARSERS)}"
         )
-    if resolved not in _PARSERS:
-        raise ValueError(f"Unsupported format '{resolved}'.")
-    return _PARSERS[resolved](path)
+    return _PARSERS[resolved_fmt](path)
