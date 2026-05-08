@@ -56,10 +56,24 @@ def build_redact_parser(subparsers: argparse._SubParsersAction) -> argparse.Argu
     return p
 
 
+def _print_dotenv(redacted: dict) -> None:
+    """Print redacted key/value pairs in dotenv format, quoting values that contain spaces."""
+    for key, value in sorted(redacted.items()):
+        # Quote the value if it contains whitespace so the output remains
+        # parseable as a valid dotenv file.
+        if any(c in value for c in (" ", "\t")):
+            print(f'{key}="{value}"')
+        else:
+            print(f"{key}={value}")
+
+
 def run_redact_command(args: argparse.Namespace) -> int:
     """Execute the redact sub-command.  Returns an exit code."""
     try:
         env = parse(args.file, fmt=args.format)
+    except FileNotFoundError:
+        print(f"error: file not found: {args.file}", file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -74,7 +88,6 @@ def run_redact_command(args: argparse.Namespace) -> int:
     if args.output == "json":
         print(json.dumps(redacted, indent=2))
     else:
-        for key, value in sorted(redacted.items()):
-            print(f"{key}={value}")
+        _print_dotenv(redacted)
 
     return 0
