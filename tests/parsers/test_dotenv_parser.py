@@ -89,3 +89,21 @@ def test_parse_dotenv_file_missing_raises(tmp_path: Path):
 def test_error_message_includes_filepath():
     with pytest.raises(DotEnvParseError, match="myfile.env:2"):
         parse_dotenv("GOOD=ok\nBAD LINE\n", filepath="myfile.env")
+
+
+def test_duplicate_key_last_value_wins():
+    """When a key appears multiple times, the last definition should take precedence."""
+    result = parse_dotenv("PORT=8080\nPORT=9090\n")
+    assert result["PORT"] == "9090"
+
+
+def test_multiline_source_error_reports_correct_line():
+    """DotEnvParseError should reference the exact line number of the bad entry."""
+    source = textwrap.dedent("""\
+        ALPHA=1
+        BETA=2
+        NOT VALID
+        GAMMA=3
+    """)
+    with pytest.raises(DotEnvParseError, match=":3"):
+        parse_dotenv(source, filepath="test.env")
